@@ -1,3 +1,14 @@
+libnss-tacplus (1.0.4-1) unstable; urgency=low
+  * Removed dependence from libtacplus_map and libaudit
+  * Removed NSS entry point for getpwuid()
+  * Modified user map profile, create local user account for each TACACS+ user
+    which not found in local.
+  * Added "many_to_one" mode, create one local user for many TACACS+ users which
+    has the same privilege.
+  * Modified configuration parse and file to adapt to the new user map profile.
+
+ -- Chenchen Qi <chenchen.qcc@alibaba-inc.com>  Tue, 10 Oct 2017 14:23:44 +0800
+
 libnss-tacplus (1.0.3-2) unstable; urgency=low
   * Fixed package remove to clean up plugin entries in nsswitch.conf
   * New Disabled: added user_homedir config variable to allow per-user
