@@ -53,7 +53,7 @@ dnl --------------------------------------------------------------------
 dnl Checks for header files.
 AC_HEADER_STDC
 AC_CHECK_HEADERS([nss.h fcntl.h stdlib.h string.h strings.h sys/socket.h sys/time.h syslog.h unistd.h])
-AC_CHECK_HEADERS([tacplus/libtac.h])
+AC_CHECK_HEADERS([libtac/libtac.h])
 
 dnl --------------------------------------------------------------------
 dnl Checks for typedefs, structures, and compiler characteristics.

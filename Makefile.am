@@ -19,7 +19,7 @@ nss_tacplus.h
 libnss_tacplus_la_CFLAGS = $(AM_CFLAGS)
 # Version 2.0 because that's the NSS module version, and they must match
 libnss_tacplus_la_LDFLAGS = -module -version-info 2:0:0 -shared
-libnss_tacplus_la_LIBADD = -ltacplus_map -ltac -laudit
+libnss_tacplus_la_LIBADD = -ltac
 
 
 EXTRA_DIST = tacplus_nss.conf README ChangeLog
@@ -52,7 +52,7 @@ install-data-hook:
 	rm -f $(DESTDIR)$(libdir)/libnss_tacplus.so $(DESTDIR)$(libdir)/libnss_tacplus.so.2.0.0
 	$(mkinstalldirs) $(DESTDIR)$(libdir) $(DESTDIR)$(sysconfdir)
 	cd .libs && $(INSTALL_PROGRAM) libnss_tacplus.so $(DESTDIR)$(libdir)/$(NSS_TACPLUS_LIBC_VERSIONED)
-	$(STRIP) --keep-symbol=_nss_tacplus_getpwnam_r --keep-symbol=_nss_tacplus_getpwuid_r $(DESTDIR)$(libdir)/$(NSS_TACPLUS_LIBC_VERSIONED)
+	$(STRIP) --keep-symbol=_nss_tacplus_getpwnam_r $(DESTDIR)$(libdir)/$(NSS_TACPLUS_LIBC_VERSIONED)
 	cd $(DESTDIR)$(libdir); ln -sf $(NSS_TACPLUS_LIBC_VERSIONED) $(NSS_TACPLUS_NSS_VERSIONED)
 	${INSTALL} -m 644 tacplus_nss.conf $(DESTDIR)$(sysconfdir)
 
