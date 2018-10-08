@@ -76,6 +76,7 @@ static useradd_info_t useradd_grp_list[MAX_TACACS_USER_PRIV + 1];
 
 static char *tac_service = "shell";
 static char *tac_protocol = "ssh";
+static char vrfname[64];
 static bool debug = false;
 static bool many_to_one = false;
 
@@ -123,6 +124,9 @@ static int parse_tac_server(char *srv_buf)
                         nssname, srv, gai_strerror(rv));
                     return -1;
                 }
+            }
+            else if(!strncmp(token, "vrf=", 4)){
+                strncpy(vrfname, token + 4, sizeof(vrfname));
             }
             else if(!strncmp(token, "secret=", 7)) {
                 if(tac_srv[tac_srv_no].key)
@@ -633,7 +637,7 @@ connect_tacacs(struct tac_attrib **attr, int srvr)
         return -1;
 
     fd = tac_connect_single(tac_srv[srvr].addr, tac_srv[srvr].key, NULL,
-                            tac_srv[srvr].timeout);
+                            tac_srv[srvr].timeout, vrfname[0] ? vrfname : NULL);
     if(fd >= 0) {
         *attr = NULL; /* so tac_add_attr() allocates memory */
         tac_add_attrib(attr, "service", tac_service);
