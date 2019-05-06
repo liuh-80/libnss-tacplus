@@ -487,7 +487,7 @@ static int create_or_modify_local_user(const char *name, int level, bool existin
 /*
  * Lookup user in /etc/passwd, and fill up passwd info if found.
  */
-static int lookup_pw_local(char* username, struct pwbuf *pb, bool *found)
+static int lookup_pw_local(const char* username, struct pwbuf *pb, bool *found)
 {
     FILE *fp;
     struct passwd *pw = NULL;
@@ -514,6 +514,45 @@ static int lookup_pw_local(char* username, struct pwbuf *pb, bool *found)
         }
     }
     fclose(fp);
+    return ret;
+}
+
+/*
+ * Return true, if user has entry in /etc/passwd and his gecos
+ * does not match with expected gecos for any tacacs user of any
+ * privilege level.
+ */
+static bool is_non_tacacs_user(const char *name)
+{
+    char buf[1024];
+    struct passwd pw;
+    int err = 0;
+    struct pwbuf pwbuf;
+    bool found = false;
+    bool ret = false;
+
+    pwbuf.buf = buf;
+    pwbuf.pw = &pw;
+    pwbuf.errnop = &err;
+    pwbuf.buflen = sizeof(buf);
+
+    lookup_pw_local(name, &pwbuf, &found);
+
+    if (found && (err == 0)) {
+        int i = MIN_TACACS_USER_PRIV;
+        const useradd_info_t *pinfo = &useradd_grp_list[i];
+
+        for(; (i <= MAX_TACACS_USER_PRIV); ++i, ++pinfo) {
+            if ((pinfo->info != NULL) &&
+                (strcmp(pinfo->info, pwbuf.pw->pw_gecos) == 0)) {
+                break;
+            }
+        }
+        if (i > MAX_TACACS_USER_PRIV) {
+            /* gecos did not match with gecos of any tacacs user info */
+            ret = true;
+        }
+    }
     return ret;
 }
 
@@ -767,6 +806,9 @@ enum nss_status _nss_tacplus_getpwnam_r(const char *name, struct passwd *pw,
     else if(0 == tac_srv_no) {
         syslog(LOG_WARNING, "%s: no tacacs server in config for nss_tacplus",
                 nssname);
+    }
+    else if(is_non_tacacs_user(name)) {
+       /* It is non-tacacs user, so bail out */
     }
     else {
         /* marshal the args for the lower level functions */
