@@ -98,7 +98,7 @@ static int parse_tac_server(char *srv_buf)
                 hints.ai_socktype = SOCK_STREAM;
 
                 srv = token + 7;
-                port = strchr(srv, ':');
+                port = strrchr(srv, ':');
                 if(port) {
                     *port = '\0';
                     port++;
