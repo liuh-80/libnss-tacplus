@@ -73,6 +73,7 @@ typedef struct {
 static tacplus_server_t tac_srv[TAC_PLUS_MAXSERVERS];
 static int tac_srv_no;
 static useradd_info_t useradd_grp_list[MAX_TACACS_USER_PRIV + 1];
+static struct addrinfo *source_addr;
 
 static char *tac_service = "shell";
 static char *tac_protocol = "ssh";
@@ -247,6 +248,10 @@ static int parse_config(const char *file)
         return NSS_STATUS_UNAVAIL;
     }
 
+    if(source_addr) {
+        freeaddrinfo(source_addr);
+        source_addr = NULL;
+    }
     debug = false;
     tac_srv_no = 0;
     while(fgets(buf, sizeof buf, fp)) {
@@ -261,6 +266,22 @@ static int parse_config(const char *file)
         }
         else if(!strncmp(buf, "user_priv=", 10)) {
             parse_user_priv(buf);
+        }
+        else if(!strncmp(buf, "src_ip=", 7)) {
+            struct addrinfo hints;
+            char *ip = buf + 7, *new_line;
+
+            // Remove the new line character as getaddrinfo is not working for IPv6 address with '\n'.
+            if ((new_line = strchr(buf, '\n')) != NULL) {
+                *new_line = '\0';
+            }
+            memset(&hints, 0, sizeof hints);
+            hints.ai_family = AF_UNSPEC;
+            hints.ai_socktype = SOCK_STREAM;
+
+            if(0 != getaddrinfo(ip, NULL, &hints, &source_addr))
+                syslog(LOG_ERR, "%s: error setting the source ip information",
+                    nssname);
         }
         else if(!strncmp(buf, "server=", 7)) {
             if(TAC_PLUS_MAXSERVERS <= tac_srv_no) {
@@ -282,6 +303,8 @@ static int parse_config(const char *file)
                         nssname, n, tac_ntop(tac_srv[n].addr->ai_addr),
                         tac_srv[n].key[0], tac_srv[n].timeout);
         }
+        syslog(LOG_DEBUG, "%s: src_ip=%s", nssname, NULL == source_addr
+                    ? "NULL" : tac_ntop(source_addr->ai_addr));
         syslog(LOG_DEBUG, "%s: many_to_one %s", nssname, 1 == many_to_one
                     ? "enable" : "disable");
         for(n = MIN_TACACS_USER_PRIV; n <= MAX_TACACS_USER_PRIV; n++) {
@@ -675,7 +698,7 @@ connect_tacacs(struct tac_attrib **attr, int srvr)
     if(!*tac_service) /* reported at config file processing */
         return -1;
 
-    fd = tac_connect_single(tac_srv[srvr].addr, tac_srv[srvr].key, NULL,
+    fd = tac_connect_single(tac_srv[srvr].addr, tac_srv[srvr].key, source_addr,
                             tac_srv[srvr].timeout, vrfname[0] ? vrfname : NULL);
     if(fd >= 0) {
         *attr = NULL; /* so tac_add_attr() allocates memory */
