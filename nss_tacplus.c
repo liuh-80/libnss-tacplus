@@ -629,8 +629,13 @@ static int lookup_user_pw(struct pwbuf *pb, int level)
     if(0 != ret)
         return ret;
 
-    if(0 != create_or_modify_local_user(username, level, found))
-        return -1;
+    if(0 == getuid()) {
+        if(0 != create_or_modify_local_user(username, level, found))
+            return -1;
+    } else {
+        if(debug)
+            syslog(LOG_DEBUG, "%d does not privilege to create or modify user %s", getuid(), username);
+    }
 
     ret = lookup_pw_local(username, pb, &found);
     if(0 == ret && !found) {
