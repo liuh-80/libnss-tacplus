@@ -127,7 +127,8 @@ static int parse_tac_server(char *srv_buf)
                 }
             }
             else if(!strncmp(token, "vrf=", 4)){
-                strncpy(vrfname, token + 4, sizeof(vrfname));
+                strncpy(vrfname, token + 4, sizeof(vrfname) - 1);
+                vrfname[sizeof(vrfname) - 1] = '\0';
             }
             else if(!strncmp(token, "secret=", 7)) {
                 if(tac_srv[tac_srv_no].key)
