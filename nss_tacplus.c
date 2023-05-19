@@ -791,6 +791,10 @@ lookup_tacacs_user(struct pwbuf *pb)
                     " invalid (%d)", nssname,
                     tac_ntop(tac_srv[srvr].addr->ai_addr), pb->name,
                     arep.status);
+
+            if (arep.status == TAC_PLUS_AUTHOR_STATUS_FAIL) {
+                done = 1; /* break out of loop after server reject user */
+            }
         }
         if(arep.msg)
             free(arep.msg);
