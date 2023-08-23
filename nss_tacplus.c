@@ -540,8 +540,7 @@ static int create_or_modify_local_user(const char *name, int level, bool existin
             snprintf(sgid, 10, "%d", user->gid);
             snprintf(home, 63, "/home/%s", name);
             if(0 != user_mod_add(command, name, sgid, user->secondary_grp, user->info, home, user->shell)) {
-                if(debug)
-                    syslog(LOG_ERR, "%s: %s %s failed", nssname, command, name);
+                 syslog(LOG_ERR, "%s: %s %s failed", nssname, command, name);
                  delete_conf_line(name);
                  return -1;
              }
@@ -858,10 +857,9 @@ lookup_tacacs_user(struct pwbuf *pb)
         arep.status = TAC_PLUS_AUTHOR_STATUS_ERROR; /* if author_send fails */
         tac_fd = connect_tacacs(&attr, srvr);
         if (tac_fd < 0) {
-            if(debug)
-                syslog(LOG_WARNING, "%s: failed to connect TACACS+ server %s,"
-                    " ret=%d: %m", nssname, tac_srv[srvr].addr ?
-                    tac_ntop(tac_srv[srvr].addr->ai_addr) : "unknown", tac_fd);
+            syslog(LOG_ERR, "%s: failed to connect TACACS+ server %s,"
+                " ret=%d: %m", nssname, tac_srv[srvr].addr ?
+                tac_ntop(tac_srv[srvr].addr->ai_addr) : "unknown", tac_fd);
             continue;
         }
         ret = tac_author_send(tac_fd, pb->name, current_tty != NULL ? (char *)current_tty : "", remote_addr, attr);
