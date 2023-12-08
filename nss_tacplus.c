@@ -34,8 +34,10 @@
 #include <netdb.h>
 #include <nss.h>
 #include <limits.h>
+#include <pthread.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <time.h>
 
 #include <libtac/libtac.h>
 
@@ -48,6 +50,12 @@
 #define GET_ENV_VARIABLE_NOT_ENOUGH_BUFFER  3
 #define GET_REMOTE_ADDRESS_OK               0
 #define GET_REMOTE_ADDRESS_FAILED           1
+
+// When parallel connection to multiple TACACS server, after first
+// server successfully connected, other server need have a slightly
+// delay to avoid authentication with multiple server factor is 4
+// because there will be 4 packets send/receve with server
+#define TACACS_SERVER_DELAY_FACTOR          4
 
 static const char *nssname = "nss_tacplus"; /* for syslogs */
 static const char *config_file = "/etc/tacplus_nss.conf";
@@ -90,6 +98,26 @@ static char *tac_protocol = "ssh";
 static char vrfname[64];
 static bool debug = false;
 static bool many_to_one = false;
+
+/* variables for parallel TACACS connection */
+static bool tacacs_auth_success = false;
+static bool tacacs_auth_finish = false;
+static int finish_server_count = 0;
+static unsigned long server_priv_level = 0;
+static uint64_t min_tac_srv_latency_us;
+
+#define max(a,b) \
+    ({ __typeof__ (a) _a = (a); \
+    __typeof__ (b) _b = (b); \
+    _a > _b ? _a : _b; })
+
+typedef struct
+{
+    const char *name;
+    int srvr;
+    char *remote_addr;
+    const char* current_tty;
+} tacacs_thread_args_t;
 
 static int parse_tac_server(char *srv_buf)
 {
@@ -696,15 +724,14 @@ static int lookup_user_pw(struct pwbuf *pb, int level)
 }
 
 /*
- * we got the user back.  Go through the attributes, find their privilege
- * level, map to the local user, fill in the data, etc.
- * Returns 0 on success, 1 on errors.
+ * we got the user back.  Go through the attributes,
+ * find their privilege level.
+ * Returns privilege level.
  */
-static int
-got_tacacs_user(struct tac_attrib *attr, struct pwbuf *pb)
+static unsigned long
+got_tacacs_priv_level(struct tac_attrib *attr, const char* name)
 {
     unsigned long priv_level = 0;
-    int ret;
 
     while(attr != NULL)  {
         /* we are looking for the privilege attribute, can be in several forms,
@@ -725,12 +752,22 @@ got_tacacs_user(struct tac_attrib *attr, struct pwbuf *pb)
              */
             if(debug)
                 syslog(LOG_DEBUG, "%s: privilege for %s, (%lu)",
-                    nssname, pb->name, priv_level);
+                    nssname, name, priv_level);
         }
         attr = attr->next;
     }
 
-    ret = lookup_user_pw(pb, priv_level);
+    return priv_level;
+}
+
+/*
+ * we got the privilege level, map to the local user, fill in the data, etc.
+ * Returns 0 on success, 1 on errors.
+ */
+static int
+got_tacacs_user(struct pwbuf *pb, unsigned long priv_level)
+{
+    int ret = lookup_user_pw(pb, priv_level);
     if(!ret && debug)
         syslog(LOG_DEBUG, "%s: pw_name=%s, pw_passwd=%s, pw_shell=%s, dir=%s",
                 nssname, pb->pw->pw_name, pb->pw->pw_passwd, pb->pw->pw_shell,
@@ -826,6 +863,144 @@ int get_remote_address(char* dst, socklen_t size)
     return GET_REMOTE_ADDRESS_FAILED;
 }
 
+uint64_t get_time_ns()
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000000000 + ts.tv_nsec;
+}
+
+/*
+ * lookup the user on a TACACS server.  Returns 0 on successful lookup, else 1
+ *
+ * Make a new connection each time, because libtac is single threaded and
+ * doesn't support multiple connects at the same time due to use of globals,
+ * and doesn't have support for persistent connections.   That's fixable, but
+ * not worth the effort at this point.
+ * Step through all servers until success or end of list, because different
+ * servers can have different databases.
+ */
+static void *
+lookup_tacacs_user_thread(void* args)
+{
+    // pthread_create require thread method only have 1 void* parameter.
+    const char *name = ((tacacs_thread_args_t*)args)->name;
+    int srvr = ((tacacs_thread_args_t*)args)->srvr;
+    char *remote_addr = ((tacacs_thread_args_t*)args)->remote_addr;
+    const char* current_tty = ((tacacs_thread_args_t*)args)->current_tty;
+    free(args);
+
+    struct areply arep;
+    int ret = 1;
+    struct tac_attrib *attr;
+    int tac_fd;
+
+    // record tacacs server connect latency
+    uint64_t latency_ns = get_time_ns();
+    arep.msg = NULL;
+    arep.attr = NULL;
+    arep.status = TAC_PLUS_AUTHOR_STATUS_ERROR; /* if author_send fails */
+    tac_fd = connect_tacacs(&attr, srvr);
+    if (tac_fd < 0) {
+        if(debug)
+            syslog(LOG_WARNING, "%s: failed to connect TACACS+ server %s,"
+                " ret=%d: %m", nssname, tac_srv[srvr].addr ?
+                tac_ntop(tac_srv[srvr].addr->ai_addr) : "unknown", tac_fd);
+        
+        // current TACACS connection thread finish
+        goto exit_tacacs_thread;
+    }
+
+    // use the min tac server connect latency to delay other TACACS server connection.
+    // this will make sure in most case SONiC device only AAA with single TACACS server.
+    // backup min_tac_srv_latency_us before update, delay_ns will be 0 if current server is
+    // the first server finish connection, which means first finish connection server
+    // no delay in following steps.
+    uint64_t delay_ms = min_tac_srv_latency_us/1000;
+    uint64_t server_latency_us = max(get_time_ns() - latency_ns, 1000);
+    min_tac_srv_latency_us = max(min_tac_srv_latency_us, server_latency_us);
+
+    // delay here so faster server may finish authorization
+    usleep(delay_ms * TACACS_SERVER_DELAY_FACTOR);
+    if (tacacs_auth_finish) {
+        if(debug)
+            syslog(LOG_DEBUG, "%s: TACACS connect thread %d stop because other TACACS server connection finished", nssname, srvr);
+
+        goto exit_tacacs_thread;
+    }
+
+    ret = tac_author_send(tac_fd, name, current_tty != NULL ? (char *)current_tty : "", remote_addr, attr);
+    if(ret < 0) {
+        if(debug)
+            syslog(LOG_WARNING, "%s: TACACS+ server %s send failed (%d) for"
+                " user %s: %m", nssname, tac_srv[srvr].addr ?
+                tac_ntop(tac_srv[srvr].addr->ai_addr) : "unknown",
+                ret, name);
+        goto exit_tacacs_thread;
+    }
+
+    if (tacacs_auth_finish) {
+        if(debug)
+            syslog(LOG_DEBUG, "%s: TACACS connect thread %d stop because other TACACS server connection finished", nssname, srvr);
+
+        goto exit_tacacs_thread;
+    }
+
+    errno = 0;
+    ret = tac_author_read(tac_fd, &arep);
+    tac_free_attrib(&attr);
+    if (ret == LIBTAC_STATUS_PROTOCOL_ERR) {
+        syslog(LOG_WARNING, "%s: TACACS+ server %s read failed with"
+            " protocol error (incorrect shared secret?) user %s",
+            nssname, tac_ntop(tac_srv[srvr].addr->ai_addr), name);
+    }
+    else if (ret < 0) { /*  ret == 1 OK transaction, use arep.status */
+        syslog(LOG_WARNING, "%s: TACACS+ server %s read failed (%d) for"
+            " user %s: %m", nssname,
+            tac_ntop(tac_srv[srvr].addr->ai_addr), ret, name);
+        goto exit_tacacs_thread;
+    }
+
+    if (tacacs_auth_finish) {
+        if(debug)
+            syslog(LOG_DEBUG, "%s: TACACS connect thread %d stop because other TACACS server connection finished", nssname, srvr);
+
+        goto exit_tacacs_thread;
+    }
+
+    // authorization success or failed, set tacacs_auth_finish to stop other server thread
+    tacacs_auth_finish = true;
+
+    if(arep.status == AUTHOR_STATUS_PASS_ADD ||
+        arep.status == AUTHOR_STATUS_PASS_REPL) {
+        server_priv_level = got_tacacs_priv_level(arep.attr, name);
+        if(debug)
+            syslog(LOG_DEBUG, "%s: TACACS+ server %s successful for user %s."
+                " local lookup %s", nssname,
+                tac_ntop(tac_srv[srvr].addr->ai_addr), name,
+                ret == 0?"OK":"no match");
+        tacacs_auth_success = true; /* set flag to notify other TACACS connection thread stop */
+    }
+    else if(debug){
+        syslog(LOG_DEBUG, "%s: TACACS+ server %s successful for user %s."
+            " invalid (%d)", nssname,
+            tac_ntop(tac_srv[srvr].addr->ai_addr), name,
+            arep.status);
+    }
+
+exit_tacacs_thread:
+    if (tac_fd >= 0)
+        close(tac_fd);
+    if(arep.msg)
+        free(arep.msg);
+    if(arep.attr) /* free returned attributes */
+        tac_free_attrib(&arep.attr);
+
+    finish_server_count += 1;
+
+    pthread_exit(NULL);
+}
+
 /*
  * lookup the user on a TACACS server.  Returns 0 on successful lookup, else 1
  *
@@ -839,10 +1014,8 @@ int get_remote_address(char* dst, socklen_t size)
 static int
 lookup_tacacs_user(struct pwbuf *pb)
 {
-    struct areply arep;
-    int ret = 1, done = 0;
-    struct tac_attrib *attr;
-    int tac_fd, srvr;
+    int ret = 1;
+    int srvr;
     char remote_addr[INET6_ADDRSTRLEN];
     const char* current_tty = getenv("SSH_TTY");
 
@@ -851,69 +1024,39 @@ lookup_tacacs_user(struct pwbuf *pb)
         syslog(LOG_DEBUG, "%s: can't get remote address from environment variable, result=%d", nssname, result);
     }
 
-    for(srvr=0; srvr < tac_srv_no && !done; srvr++) {
-        arep.msg = NULL;
-        arep.attr = NULL;
-        arep.status = TAC_PLUS_AUTHOR_STATUS_ERROR; /* if author_send fails */
-        tac_fd = connect_tacacs(&attr, srvr);
-        if (tac_fd < 0) {
-            syslog(LOG_ERR, "%s: failed to connect TACACS+ server %s,"
-                " ret=%d: %m", nssname, tac_srv[srvr].addr ?
-                tac_ntop(tac_srv[srvr].addr->ai_addr) : "unknown", tac_fd);
-            continue;
-        }
-        ret = tac_author_send(tac_fd, pb->name, current_tty != NULL ? (char *)current_tty : "", remote_addr, attr);
-        if(ret < 0) {
-            if(debug)
-                syslog(LOG_WARNING, "%s: TACACS+ server %s send failed (%d) for"
-                    " user %s: %m", nssname, tac_srv[srvr].addr ?
-                    tac_ntop(tac_srv[srvr].addr->ai_addr) : "unknown", ret,
-                    pb->name);
-        }
-        else  {
-            errno = 0;
-            ret = tac_author_read(tac_fd, &arep);
-            if (ret == LIBTAC_STATUS_PROTOCOL_ERR)
-                syslog(LOG_WARNING, "%s: TACACS+ server %s read failed with"
-                    " protocol error (incorrect shared secret?) user %s",
-                    nssname, tac_ntop(tac_srv[srvr].addr->ai_addr), pb->name);
-            else if (ret < 0) /*  ret == 1 OK transaction, use arep.status */
-                syslog(LOG_WARNING, "%s: TACACS+ server %s read failed (%d) for"
-                    " user %s: %m", nssname,
-                    tac_ntop(tac_srv[srvr].addr->ai_addr), ret, pb->name);
-        }
+    // connect to all TACACS server in parallel
+    // after any server authorized and set tacacs_auth_success to true, other connection will stop.
+    min_tac_srv_latency_us = 0;
+    for(srvr=0; srvr < tac_srv_no; srvr++) {
+        pthread_t thread;
+        tacacs_thread_args_t* args = malloc(sizeof(tacacs_thread_args_t));
+        args->name = pb->name;
+        args->srvr = srvr;
+        args->remote_addr = remote_addr;
+        args->current_tty = current_tty;
+        pthread_create(&thread, NULL, lookup_tacacs_user_thread, args);
+        
+        // if all server are very fast, first server will finish first and will not request authentication to multiple server.
+        usleep(1000 * TACACS_SERVER_DELAY_FACTOR);
+    }
 
-        tac_free_attrib(&attr);
-        close(tac_fd);
-        if(ret < 0)
-            continue;
+    // wait until one TACACS thread succeeded or all TACACS thread failed.
+    while (!tacacs_auth_finish && (finish_server_count < tac_srv_no)) {
+        usleep(1000);
+    }
 
-        if(arep.status == AUTHOR_STATUS_PASS_ADD ||
-           arep.status == AUTHOR_STATUS_PASS_REPL) {
-            ret = got_tacacs_user(arep.attr, pb);
-            if(debug)
-                syslog(LOG_DEBUG, "%s: TACACS+ server %s successful for user %s."
-                    " local lookup %s", nssname,
-                    tac_ntop(tac_srv[srvr].addr->ai_addr), pb->name,
-                    ret == 0?"OK":"no match");
-            done = 1; /* break out of loop after arep cleanup */
-        }
-        else {
-            ret = 1; /*  in case last server */
-            if(debug)
-                syslog(LOG_DEBUG, "%s: TACACS+ server %s replies user %s"
-                    " invalid (%d)", nssname,
-                    tac_ntop(tac_srv[srvr].addr->ai_addr), pb->name,
-                    arep.status);
-
-                    if (arep.status == TAC_PLUS_AUTHOR_STATUS_FAIL) {
-                        done = 1; /* break out of loop after server reject user */
-                    }
-        }
-        if(arep.msg)
-            free(arep.msg);
-        if(arep.attr) /* free returned attributes */
-            tac_free_attrib(&arep.attr);
+    if (tacacs_auth_success) {
+        ret = got_tacacs_user(pb, server_priv_level);
+        if(debug)
+            syslog(LOG_DEBUG, "%s: TACACS+ successful for user %s."
+                " local lookup %s", nssname, pb->name,
+                ret == 0?"OK":"no match");
+    }
+    else if (finish_server_count == tac_srv_no) {
+        ret = 1; /*  All tacacs server connect failed */
+        if(debug)
+            syslog(LOG_DEBUG, "%s: all TACACS+ server replies user %s"
+                " invalid", nssname, pb->name);
     }
 
     return ret;
