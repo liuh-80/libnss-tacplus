@@ -350,11 +350,11 @@ pwcopy(char *buf, size_t len, struct passwd *srcpw, struct passwd *destpw,
     if(!usename)
         usename = srcpw->pw_name;
 
-    needlen = usename ? strlen(usename) + 1 : 1 +
-        srcpw->pw_dir ? strlen(srcpw->pw_dir) + 1 : 1 +
-        srcpw->pw_gecos ? strlen(srcpw->pw_gecos) + 1 : 1 +
-        srcpw->pw_shell ? strlen(srcpw->pw_shell) + 1 : 1 +
-        srcpw->pw_passwd ? strlen(srcpw->pw_passwd) + 1 : 1;
+    needlen = (usename ? strlen(usename) + 1 : 1) +
+        (srcpw->pw_dir ? strlen(srcpw->pw_dir) + 1 : 1) +
+        (srcpw->pw_gecos ? strlen(srcpw->pw_gecos) + 1 : 1) +
+        (srcpw->pw_shell ? strlen(srcpw->pw_shell) + 1 : 1) +
+        (srcpw->pw_passwd ? strlen(srcpw->pw_passwd) + 1 : 1);
     if(needlen > len) {
         if(debug)
             syslog(LOG_DEBUG, "%s provided password buffer too small (%ld<%ld)",
